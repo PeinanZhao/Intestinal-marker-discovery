@@ -1,0 +1,286 @@
+---
+title: "GSE116222 scRNA-seq analysis"
+author: "Peinan Zhao"
+---
+
+```{r, include=FALSE}
+library(Seurat)
+library(tidyverse)
+library(future)
+library(RColorBrewer)
+library(clusterProfiler)
+library(data.table)
+library(vroom)
+library(xlsx)
+```
+
+Load data
+
+```{r}
+# load data into Seurat object
+raw.count <- vroom("GSE116222_Expression_matrix.txt", delim = "\t")
+raw.count <- as.data.frame(raw.count)
+rownames(raw.count) <- raw.count$Gene
+raw.count <- raw.count[,-c(1)]
+colon <- CreateSeuratObject(counts = raw.count, min.cells = 3, min.genes = 200, project = "colon")
+
+# assign sample code
+colon$sample <- factor(gsub(".*-","",names(colon$orig.ident)))
+# assign phenotype
+colon$phenotype <- ifelse(grepl("1",colon$sample),"healthy",
+                          ifelse(grepl("2",colon$sample), "non_inflamed", 
+                                 ifelse(grepl("3",colon$sample),"inflamed","unknown")))
+```
+
+QC
+
+```{r}
+colon[["percent.mt"]] <- PercentageFeatureSet(colon, pattern = "^MT-")
+FeatureScatter(colon, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(colon, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+colon <- subset(colon, subset = nCount_RNA > 1000 & nCount_RNA < 4000)
+```
+
+Normalisation
+
+```{r}
+colon <- NormalizeData(colon)
+colon <- FindVariableFeatures(colon, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(colon)
+colon <- ScaleData(colon, features = all.genes)
+colon <- RunPCA(colon, verbose = FALSE)
+colon <- RunUMAP(colon, reduction = "pca", dims = 1:30)
+colon <- FindNeighbors(colon, dims = 1:10)
+colon <- FindClusters(colon, resolution = 0.3)
+DimPlot(colon, group.by = "sample", cols = brewer.pal(n=12, name="Paired")[c(1:9)])
+```
+
+Integration
+
+```{r, fig.height=5, fig.width=10}
+Idents(colon) <- "phenotype"
+
+## Integrate between all samples
+colon.list <- SplitObject(colon, split.by = "sample")
+colon.list <- lapply(X = colon.list, FUN = SCTransform)
+features <- SelectIntegrationFeatures(object.list = colon.list, nfeatures = 3000)
+colon.list <- PrepSCTIntegration(object.list = colon.list, anchor.features = features)
+colon.anchors <- FindIntegrationAnchors(object.list = colon.list, normalization.method = "SCT",
+    anchor.features = features)
+colon.integrated.all <- IntegrateData(anchorset = colon.anchors, normalization.method = "SCT")
+
+colon.integrated.all <- RunPCA(colon.integrated.all, verbose = FALSE)
+colon.integrated.all <- RunUMAP(colon.integrated.all, reduction = "pca", dims = 1:30)
+p <- DimPlot(colon.integrated.all, reduction = "umap", group.by = "sample", split.by = "phenotype", cols = brewer.pal(n=12, name="Paired")[c(1:9)])
+p
+
+## this line of code saves the data
+save.image("colon.RData")
+```
+
+Dimensional reduction
+
+```{r}
+DefaultAssay(colon.integrated.all) <- "integrated"
+colon.integrated.all <- RunUMAP(colon.integrated.all, reduction = "pca", dims = 1:10)
+colon.integrated.all <- FindNeighbors(colon.integrated.all, dims = 1:10)
+colon.integrated.all <- FindClusters(colon.integrated.all, resolution = 0.3)
+DimPlot(colon.integrated.all)
+
+DefaultAssay(colon.integrated.all) <- "SCT"
+colon.integrated.markers <- FindAllMarkers(colon.integrated.all, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, assay = "SCT", slot = "data")
+
+### write marker genes into csv file
+colon.markers.sig <- colon.integrated.markers[which(colon.integrated.markers$p_val_adj<0.01),]
+write_csv(colon.markers.sig, "colon_cluster_markers.csv", col_names = T)
+
+### print pdf
+pdf("colon_UMAP.pdf", width = 7, height = 5)
+DimPlot(colon.integrated.all, cols = brewer.pal(n=12, name="Paired")[c(1:11)])
+dev.off()
+
+DimPlot(colon.integrated.all, group.by = "phenotype")
+```
+
+Assign cell types
+
+```{r}
+Idents(colon.integrated.all) <- "seurat_clusters"
+new.cluster.ids <- c("CT colonocytes", "Undifferentiated #2", "Goblet cells", "Undifferentiated #2",
+                     "Undifferentiated #1", "Colonocytes", "T cells/Mast cells", "ILCs", 
+                     "Undifferentiated #1", "EEC cells", "EEC cells")
+
+names(new.cluster.ids) <- levels(colon.integrated.all)
+colon.integrated.all <- RenameIdents(colon.integrated.all, new.cluster.ids)
+Idents(colon.integrated.all) <- factor(Idents(colon.integrated.all),
+                                       levels = c("Undifferentiated #1", "Undifferentiated #2", "Colonocytes", "CT colonocytes", "Goblet cells", "EEC cells", "T cells/Mast cells", "ILCs"))
+
+# Cell type
+colon.integrated.all$cellType <- Idents(colon.integrated.all)
+
+# identify cell type markers
+colon.cellType.markers <- FindAllMarkers(colon.integrated.all, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, assay = "SCT", slot = "data")
+
+### write marker genes into csv file
+colon.cellType.sig <- colon.cellType.markers[which(colon.cellType.markers$p_val_adj<0.01),]
+write_csv(colon.cellType.sig, "colon_cellType_markers.csv", col_names = T)
+
+
+Idents(colon.integrated.all) <- "cellType"
+pdf("colon_UMAP_celltype.pdf", width = 7, height = 5)
+DimPlot(colon.integrated.all, cols = brewer.pal(n=12, name="Paired")[c(1:11)])
+dev.off()
+
+## Dot plot
+top_5.markers <- colon.cellType.sig %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+pdf("Celltype_dotplot_all.pdf", width = 7, height = 10)
+DotPlot(object = colon.integrated.all, features = unique(top_5.markers$gene)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  coord_flip() + labs(x ="", y = "")
+dev.off()
+```
+
+DE genes, inflamed vs. non inflamed
+
+```{r}
+colon.integrated.all$phenotype <- ifelse(grepl("1",colon.integrated.all$sample),"healthy",
+                                  ifelse(grepl("2",colon.integrated.all$sample), "non_inflamed", 
+                                  ifelse(grepl("3",colon.integrated.all$sample),"inflamed","unknown")))
+
+Idents(colon.integrated.all) <- "phenotype"
+DimPlot(colon.integrated.all)
+
+## Using SCTransformed assay
+DefaultAssay(colon.integrated.all) <- "SCT"
+all.genes <- rownames(colon.integrated.all)
+colon.integrated.all <- ScaleData(colon.integrated.all, features = all.genes)
+
+colon.phenotype.markers <- FindMarkers(colon.integrated.all, ident.1 = "inflamed", ident.2 = "non_inflamed", assay = "SCT", slot = "data")
+colon.phenotype.markers.sig <- colon.phenotype.markers[which(colon.phenotype.markers$p_val_adj<0.01),]
+write.csv(colon.phenotype.markers.sig, "colon_phenotype_markers_noninflame_inflame.csv", row.names = T, col.names = T)
+
+colon.inflamed <- colon.phenotype.markers.sig[which(colon.phenotype.markers.sig$avg_log2FC>0),]
+colon.healthy <- colon.phenotype.markers.sig[which(colon.phenotype.markers.sig$avg_log2FC<0),]
+
+GOI <- rownames(colon.phenotype.markers.sig)[which(rownames(colon.phenotype.markers.sig) %in% names(remission.hubgenes))]
+colon.phenotype.markers.goi <- colon.phenotype.markers.sig %>% 
+  dplyr::filter(rownames(colon.phenotype.markers.sig) %in% GOI)
+```
+
+GOI feature plot
+
+```{r}
+colon.integrated.subset <- subset(colon.integrated.all, subset = phenotype=="inflamed"|phenotype=="non_inflamed")
+DefaultAssay(colon.integrated.subset) <- "SCT"
+
+for(gene in c("HSD17B2","FAM162A","AQP8","TNNC2","SULT1A1","SELENBP1","SLC26A2","ACADS","PADI2","TST")){
+
+  pdf(paste("GOI_10genes/feature_plots/", gene,"_featureplot.pdf", sep = ""), width = 7, height = 5)
+  print(FeaturePlot(colon.integrated.subset, features = gene, split.by = "phenotype"))
+  dev.off()
+}
+```
+
+Differential expression between inflamed and non-inflamed genes in each cell type
+
+```{r}
+# Phenotype
+colon.integrated.all$phenotype <- ifelse(grepl("1",colon.integrated.all$sample),"healthy",
+                                  ifelse(grepl("2",colon.integrated.all$sample), "non_inflamed", 
+                                  ifelse(grepl("3",colon.integrated.all$sample),"inflamed","unknown")))
+
+# Find DE genes in each subtype
+colon.integrated.all$combined.type <- paste(colon.integrated.all$cellType, 
+                                            colon.integrated.all$phenotype, sep = "_")
+Idents(colon.integrated.all) <- "combined.type"
+subtype_DE <- list()
+celltype.DE.goi <- c()
+for (ct in levels(colon.integrated.all$cellType)){
+  id1 <- paste(ct, "_inflamed", sep = "") 
+  id2 <- paste(ct, "_non_inflamed", sep = "") 
+  subtype_DE[[ct]] <- FindMarkers(colon.integrated.all, ident.1 = id1, ident.2 = id2, 
+                                  assay = "SCT", slot = "data")
+  write.xlsx(subtype_DE[[ct]],
+             file = "CellType_phenotype_markers_noninflame_inflame.xlsx",
+             sheetName = gsub("/"," ", ct),
+             row.names = T, col.names = T,
+             append = ifelse(ct == levels(colon.integrated.all$cellType)[1], FALSE, TRUE))
+  
+  celltype.degs <- rownames(subtype_DE[[ct]])
+  celltype.DE.goi <- c(celltype.DE.goi, celltype.degs[which(celltype.degs %in% names(remission.hubgenes))])
+}
+
+celltype.DE.goi <- unique(celltype.DE.goi)
+```
+
+Plots for goi
+
+```{r}
+Idents(colon.integrated.all) <- "cellType"
+DefaultAssay(colon.integrated.all) <- "RNA"
+colon.integrated.all <- NormalizeData(colon.integrated.all, verbose = FALSE)
+GOI <- rownames(colon.phenotype.markers.sig)[which(rownames(colon.phenotype.markers.sig) %in% names(remission.hubgenes))]
+
+for (gene in GOI){
+  p <- VlnPlot(colon.integrated.all, features = gene, assay = "RNA", slot = "data", 
+               pt.size = 0, cols = brewer.pal(n=12, name="Paired")[c(1:11)])+
+      geom_boxplot(width=0.3, color="black", alpha=0.2)+
+      xlab("") +
+      theme(title = element_text(size=25), 
+            axis.text=element_text(size=20),
+            axis.text.x = element_text(angle = 50, size = 15), 
+            axis.title=element_text(size=23))+
+      NoLegend()
+    print(p)
+}
+
+DE_goi <- ""
+for (ct in names(subtype_DE)){
+  print(ct)
+  DE <- subtype_DE[[ct]] %>%
+    mutate(cellType = ct)
+  DE <- DE %>%
+    mutate(Gene = rownames(DE)) %>%
+    filter(rownames(DE) %in% GOI & p_val_adj < 0.05)
+  if(length(DE$Gene>0)){
+    if(!length(DE_goi)){
+      DE_goi <- DE
+    }
+    else{
+      DE_goi <- rbind(DE_goi, DE)
+    }
+  }
+}
+DE_goi <- DE_goi[-1,]
+
+DE_goi$cellType <- factor(DE_goi$cellType, levels = levels(colon.integrated.all$cellType))
+DE_goi$avg_log2FC <- -as.numeric(DE_goi$avg_log2FC)
+DE_goi$p_val_adj <- as.numeric(DE_goi$p_val_adj)
+DE_goi$Gene <- factor(DE_goi$Gene, levels = rev(GOI))
+
+
+p <- ggplot(DE_goi, aes(x = cellType, y = Gene)) +
+      scale_x_discrete(drop=FALSE) +
+      geom_point(aes(size = avg_log2FC, fill = p_val_adj), alpha = 0.75, shape = 21) + 
+      scale_size_area(max_size=10)+
+      labs( x= "", y = "")+
+      scale_fill_gradient(low = brewer.pal(n = 9, name = "Purples")[9], 
+                          high = brewer.pal(n = 9, name = "Purples")[2])+
+      theme(legend.key=element_blank(), 
+      axis.text.x = element_text(colour = "black", size = 12, face = "bold", angle = 90), 
+      axis.text.y = element_text(colour = "black", face = "bold", size = 11), 
+      legend.text = element_text(size = 10, face ="bold", colour ="black"), 
+      legend.title = element_text(size = 12, face = "bold"), 
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill = NA, size = 1), 
+      legend.position = "right")
+```
+
+
+
+
+
+
