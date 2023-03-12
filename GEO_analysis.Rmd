@@ -1,0 +1,687 @@
+---
+title: "integrative analysis of inflamed/non-inflamed intestinal tissues of 6 GEO datasets"
+author: Peinan Zhao
+---
+
+```{r, include=FALSE}
+Sys.setenv(RENV_PATHS_CACHE = "/fs02/ha75/renv/cache/")
+Sys.setenv(R_LIBS = "/fs02/ha75/R_library_4.0/")
+.libPaths("~/ha75/R_library_4.0/")
+
+library(GEOquery)
+library(edgeR)
+library(limma)
+library(clusterProfiler)
+library(ReactomePA)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(readxl)
+library(UpSetR)
+library(org.Hs.eg.db)
+library(CEMiTool)
+library(WGCNA)
+library(msigdbr)
+library(affy)
+library(DescTools)
+library(VennDiagram)
+library(RColorBrewer)
+library(xlsx)
+library(tidyverse)
+
+#load("analysis_result.Rdata")
+```
+
+## Results {.tabset}
+
+### load datasets
+
+```{r, include=FALSE}
+include.study <- c("38713","95437","179285","59071","75214","83687")
+DE_files <- list.files("DE_genes", full.names = T)
+
+DE.genes.list <- list()
+active.genes.list <- list()
+remission.genes.list <- list()
+
+active.genes.list.1 <- list()
+remission.genes.list.1 <- list()
+
+for(study in include.study){
+  DE.table <- read.csv(DE_files[grepl(study, DE_files)]) 
+  
+  DE.genes.list[[study]] <- dplyr::filter(DE.table,!duplicated(DE.table$Gene))$Gene
+  remission.genes.list[[study]] <- dplyr::filter(DE.table, logFC>0 & !duplicated(DE.table$Gene))$Gene
+  active.genes.list[[study]] <- dplyr::filter(DE.table, logFC<0 & !duplicated(DE.table$Gene))$Gene
+
+  remission.genes.list.1[[study]] <- tibble(gene = remission.genes.list[[study]], !!study := rep(1, length(remission.genes.list[[study]])))
+  active.genes.list.1[[study]] <- tibble(gene = active.genes.list[[study]], !!study := rep(1, length(active.genes.list[[study]])))
+}
+
+remission.matrix <- remission.genes.list.1 %>%
+  purrr::reduce(full_join, by = "gene") %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum = rowSums(across(where(is.numeric))))
+
+active.matrix <- active.genes.list.1 %>%
+  purrr::reduce(full_join, by = "gene") %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum = rowSums(across(where(is.numeric))))
+
+
+remission.matrix.sort <- remission.matrix[order(-remission.matrix$sum),]
+write_csv(remission.matrix.sort, "tables/common_remission_genes.csv")
+
+active.matrix.sort <- active.matrix[order(-active.matrix$sum),]
+write_csv(active.matrix.sort, "tables/common_active_genes.csv")
+```
+
+### UpSetR
+
+```{r, fig.width=10, fig.height=5, echo=FALSE}
+include.study <- paste("GSE", include.study, sep = "")
+comset <- CombSet(include.study, 5, repl = F, ord = F)
+ints <- list()
+queries <- list
+for (i in c(1:length(comset[,1]))){
+  ints[[i]] <- c(comset[i,])
+}
+ints[[i+1]] <- c(include.study)
+
+up.plot <- as.data.frame(remission.matrix[,c(2:7)])
+colnames(up.plot) <- paste("GSE",colnames(up.plot), sep = "")
+pdf("figures/UpSetR_remission.pdf", width = 10, height = 5)
+upset(up.plot, mainbar.y.label = "Remission marker genes",nsets = 6, order.by = c("freq"),
+      queries = list(
+        list(query = intersects, params = ints[[1]], color = "orange", active = T),
+        list(query = intersects, params = ints[[5]], color = "orange", active = T),
+        list(query = intersects, params = ints[[6]], color = "orange", active = T),
+        list(query = intersects, params = ints[[7]], color = "orange", active = T)), 
+      point.size = 2, number.angles = 20)
+dev.off()
+
+pdf("figures/UpSetR_active.pdf", width = 10, height = 5)
+up.plot <- as.data.frame(active.matrix[,c(2:7)])
+colnames(up.plot) <- paste("GSE",colnames(up.plot), sep = "")
+upset(up.plot, mainbar.y.label = "Active marker genes",nsets = 6, order.by = c("freq"),
+      queries = list(
+        list(query = intersects, params = ints[[1]], color = "orange", active = T),
+        list(query = intersects, params = ints[[5]], color = "orange", active = T),
+        list(query = intersects, params = ints[[6]], color = "orange", active = T),
+        list(query = intersects, params = ints[[7]], color = "orange", active = T)), 
+      point.size = 2, number.angles = 20)
+dev.off()
+
+```
+
+Common Remission marker genes: Up regulation in remission group in **>= 5** studies
+
+```{r, message=FALSE, warning=FALSE}
+common.remission <- dplyr::filter(remission.matrix, sum >= 5)$gene
+common.remission.Entrez <- mapIds(org.Hs.eg.db, keys = common.remission, column = "ENTREZID", keytype = "SYMBOL")
+
+GO.common.remission <- enrichGO(gene        = common.remission.Entrez,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05, readable = T)
+GO.common.remission <- GO.common.remission@result
+GO.common.remission$Fold.enrichment <- calculateFoldEnrichment(GO.common.remission)
+GO.common.remission <- GO.common.remission  %>%
+  filter(p.adjust < 0.01)
+write.xlsx(GO.common.remission, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Remission", row.names = F, append = F)
+```
+
+Common Active marker genes: Up regulation in remission group in **>= 5** studies
+
+```{r}
+common.active <- dplyr::filter(active.matrix, sum >=5)$gene
+common.active.Entrez <- mapIds(org.Hs.eg.db, keys = common.active, column = "ENTREZID", keytype = "SYMBOL")
+
+GO.common.active <- enrichGO(gene        = common.active.Entrez,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05, readable = T)
+GO.common.active <- GO.common.active@result
+GO.common.active$Fold.enrichment <- calculateFoldEnrichment(GO.common.active)
+GO.common.active <- GO.common.active  %>%
+  filter(p.adjust < 0.01)
+write.xlsx(GO.common.active, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Inflamed", row.names = F, append = T)
+```
+
+all DEGs
+
+```{r}
+all.DEGs <- rbind(remission.matrix, active.matrix)
+at_least_3 <- filter(all.DEGs, sum >=3)
+at_least_4 <- filter(all.DEGs, sum >=4)
+at_least_5 <- filter(all.DEGs, sum >=5)
+at_least_6 <- filter(all.DEGs, sum >=6)
+```
+
+UpsetR plot for DE genes in >= 5 studies
+
+```{r}
+# combined
+up.plot1 <- as.data.frame(remission.matrix) %>%
+  rbind(as.data.frame(active.matrix)) %>%
+  filter(sum >= 5) %>%
+  mutate(type = ifelse(gene %in% common.remission, "2", "3"))
+colnames(up.plot1) <- paste("GSE",colnames(up.plot1), sep = "")
+
+p <- upset(up.plot1, mainbar.y.label = "DE genes",nsets = 15, order.by = c("freq"), point.size = 2, 
+      number.angles = 0, main.bar.color = "#EC6914", show.numbers = F, query.legend = "top", text.scale = 1.3,
+      queries = list(
+        list(query = elements, params = list("GSEtype", c(2,3)), color = "#EC6914", active = T, 
+             query.name = "Active"),
+        list(query = elements, params = list("GSEtype", 2), color = "#044c94", active = T, 
+             query.name = "Remission")
+      ))
+pdf("figures/UpSetR_combined.pdf", width = 5.5, height = 5)
+p
+dev.off()
+
+#remission
+up.plot2 <- as.data.frame(remission.matrix) %>%
+  filter(sum >= 5)
+colnames(up.plot2) <- paste("GSE",colnames(up.plot2), sep = "")
+p <- upset(up.plot2, mainbar.y.label = "Common remission genes",nsets = 15, order.by = c("freq"), point.size = 2,
+           text.scale = 1.3, number.angles = 0, main.bar.color = "#044c94")
+pdf("figures/UpSetR_remission.pdf", width = 6, height = 5)
+p
+dev.off()
+
+#active
+up.plot3 <- as.data.frame(active.matrix) %>%
+  filter(sum >= 5)
+colnames(up.plot3) <- paste("GSE",colnames(up.plot3), sep = "")
+p <- upset(up.plot3, mainbar.y.label = "Common active genes",nsets = 15, order.by = c("freq"), point.size = 2, 
+      number.angles = 0, main.bar.color = "#EC6914", text.scale = 1.3)
+pdf("figures/UpSetR_active.pdf", width = 5, height = 5)
+p
+dev.off()
+```
+
+
+### GO analysis
+
+```{r, include=FALSE}
+calculateFoldEnrichment <- function(GO){
+  df <- data.frame(GeneRatio = GO$GeneRatio, BgRatio = GO$BgRatio)
+  df[] <- apply(df, c(1, 2), function(x) eval(parse(text = x)))
+  fold.enrich <- df$GeneRatio/df$BgRatio
+  return(fold.enrich)
+}
+```
+
+Find over-represented GO-BP genesets by remission/non-inflamed samples in each GEO dataset
+
+```{r, include=FALSE}
+remission.gene.EntrezID <- as.data.frame(remission.matrix)
+remission.gene.EntrezID$EntrezID <- mapIds(org.Hs.eg.db, keys = remission.gene.EntrezID$gene, keytype = "SYMBOL", column = "ENTREZID")
+
+## 38713
+GO.38713.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `38713` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.38713.remission <- GO.38713.remission@result
+GO.38713.remission$Fold.enrichment <- calculateFoldEnrichment(GO.38713.remission)
+GO.38713.remission.sig <- GO.38713.remission %>%
+  filter(p.adjust < 0.01)
+
+### 95437
+GO.95437.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `95437` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.95437.remission <- GO.95437.remission@result
+GO.95437.remission$Fold.enrichment <- calculateFoldEnrichment(GO.95437.remission)
+GO.95437.remission.sig <- GO.95437.remission  %>%
+  filter(p.adjust < 0.01)
+
+
+### 179285
+GO.179285.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `179285` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.179285.remission <- GO.179285.remission@result
+GO.179285.remission$Fold.enrichment <- calculateFoldEnrichment(GO.179285.remission)
+GO.179285.remission.sig <- GO.179285.remission  %>%
+  filter(p.adjust < 0.01)
+
+
+### 59071
+GO.59071.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `59071` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.59071.remission <- GO.59071.remission@result
+GO.59071.remission$Fold.enrichment <- calculateFoldEnrichment(GO.59071.remission)
+GO.59071.remission.sig <- GO.59071.remission  %>%
+  filter(p.adjust < 0.01)
+
+### 75214
+GO.75214.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `75214` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.75214.remission <- GO.75214.remission@result
+GO.75214.remission$Fold.enrichment <- calculateFoldEnrichment(GO.75214.remission)
+GO.75214.remission.sig <- GO.75214.remission  %>%
+  filter(p.adjust < 0.01)
+
+### 83687
+GO.83687.remission <- enrichGO(gene          = filter(remission.gene.EntrezID, `83687` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.83687.remission <- GO.83687.remission@result
+GO.83687.remission$Fold.enrichment <- calculateFoldEnrichment(GO.83687.remission)
+GO.83687.remission.sig <- GO.83687.remission  %>%
+  filter(p.adjust < 0.01)
+
+remission.sig.GO <- list(GSE38713 = GO.38713.remission.sig, 
+                         GSE95437 = GO.95437.remission.sig, 
+                         GSE179285 = GO.179285.remission.sig, 
+                         GSE59071 = GO.59071.remission.sig, 
+                         GSE75214 = GO.75214.remission.sig, 
+                         GSE83687 = GO.83687.remission.sig)
+remission.GO.list <- list()
+for(study in names(remission.sig.GO)){
+  remission.GO.list[[study]] <- tibble(GO = remission.sig.GO[[study]]$Description, 
+                                       !!study := rep(1, length(remission.sig.GO[[study]]$ID)))
+}
+
+remission.GO.matrix <- remission.GO.list %>%
+  purrr::reduce(full_join, by = "GO") %>%
+  replace(is.na(.), 0) %>%
+  mutate(ave = rowSums(across(where(is.numeric)))/6) %>%
+  arrange(-ave)
+remission.GO.df <- as.data.frame(remission.GO.matrix)[c(2:7)]
+
+remission.GO.term <- remission.GO.matrix$GO[1:20]
+remission.GO.all <- do.call("rbind", list( GSE95437 = GO.95437.remission.sig, 
+                                           GSE179285 = GO.179285.remission.sig, 
+                                           GSE59071 = GO.59071.remission.sig, 
+                                           GSE75214 = GO.75214.remission.sig, 
+                                           GSE83687 = GO.83687.remission.sig,
+                                           GSE38713 = GO.38713.remission.sig)) %>%
+  filter(Description %in% remission.GO.term)
+
+remission.GO.all$Dataset <- gsub(".GO.*","",rownames(remission.GO.all))
+remission.GO.all$Dataset <- factor(remission.GO.all$Dataset,
+                                   levels = unique(remission.GO.all$Dataset))
+
+write.csv(remission.GO.all, "tables/Remission_GO_all.csv")
+```
+
+Find over-represented GO-BP genesets by inflamed samples in each GEO dataset
+
+```{r, include=FALSE}
+active.gene.EntrezID <- as.data.frame(active.matrix)
+active.gene.EntrezID$EntrezID <- mapIds(org.Hs.eg.db, keys = active.gene.EntrezID$gene, keytype = "SYMBOL", column = "ENTREZID")
+
+## 38713
+GO.38713.active <- enrichGO(gene          = filter(active.gene.EntrezID, `38713` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.38713.active <- GO.38713.active@result
+GO.38713.active$Fold.enrichment <- calculateFoldEnrichment(GO.38713.active)
+GO.38713.active.sig <- GO.38713.active %>%
+  filter(p.adjust < 0.01)
+
+### 95437
+GO.95437.active <- enrichGO(gene          = filter(active.gene.EntrezID, `95437` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.95437.active <- GO.95437.active@result
+GO.95437.active$Fold.enrichment <- calculateFoldEnrichment(GO.95437.active)
+GO.95437.active.sig <- GO.95437.active  %>%
+  filter(p.adjust < 0.01)
+
+
+### 179285
+GO.179285.active <- enrichGO(gene          = filter(active.gene.EntrezID, `179285` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.179285.active <- GO.179285.active@result
+GO.179285.active$Fold.enrichment <- calculateFoldEnrichment(GO.179285.active)
+GO.179285.active.sig <- GO.179285.active  %>%
+  filter(p.adjust < 0.01)
+
+
+### 59071
+GO.59071.active <- enrichGO(gene          = filter(active.gene.EntrezID, `59071` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.59071.active <- GO.59071.active@result
+GO.59071.active$Fold.enrichment <- calculateFoldEnrichment(GO.59071.active)
+GO.59071.active.sig <- GO.59071.active  %>%
+  filter(p.adjust < 0.01)
+
+### 75214
+GO.75214.active <- enrichGO(gene          = filter(active.gene.EntrezID, `75214` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.75214.active <- GO.75214.active@result
+GO.75214.active$Fold.enrichment <- calculateFoldEnrichment(GO.75214.active)
+GO.75214.active.sig <- GO.75214.active  %>%
+  filter(p.adjust < 0.01)
+
+### 83687
+GO.83687.active <- enrichGO(gene          = filter(active.gene.EntrezID, `83687` == 1)$EntrezID,
+                               OrgDb         = org.Hs.eg.db,
+                               ont           = "BP",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+GO.83687.active <- GO.83687.active@result
+GO.83687.active$Fold.enrichment <- calculateFoldEnrichment(GO.83687.active)
+GO.83687.active.sig <- GO.83687.active  %>%
+  filter(p.adjust < 0.01)
+
+active.sig.GO <- list(GSE38713 = GO.38713.active.sig, 
+                         GSE95437 = GO.95437.active.sig, 
+                         GSE179285 = GO.179285.active.sig, 
+                         GSE59071 = GO.59071.active.sig, 
+                         GSE75214 = GO.75214.active.sig, 
+                         GSE83687 = GO.83687.active.sig)
+active.GO.list <- list()
+for(study in names(active.sig.GO)){
+  active.GO.list[[study]] <- tibble(GO = active.sig.GO[[study]]$Description, 
+                                       !!study := rep(1, length(active.sig.GO[[study]]$ID)))
+}
+
+active.GO.list <- list()
+for(study in names(active.sig.GO)){
+  active.GO.list[[study]] <- tibble(GO = active.sig.GO[[study]]$Description, 
+                                       !!study := -log10(active.sig.GO[[study]]$p.adjust))
+}
+
+active.GO.matrix <- active.GO.list %>%
+  purrr::reduce(full_join, by = "GO") %>%
+  replace(is.na(.), 0) %>%
+  mutate(ave = rowSums(across(where(is.numeric)))/6) %>%
+  arrange(-ave)
+active.GO.df <- as.data.frame(active.GO.matrix)[c(2:7)]
+
+active.GO.term <- active.GO.matrix$GO[1:20]
+active.GO.all <- do.call("rbind", list( GSE95437 = GO.95437.active.sig, 
+                                           GSE179285 = GO.179285.active.sig, 
+                                           GSE59071 = GO.59071.active.sig, 
+                                           GSE75214 = GO.75214.active.sig, 
+                                           GSE83687 = GO.83687.active.sig,
+                                           GSE38713 = GO.38713.active.sig)) %>%
+  filter(Description %in% active.GO.term)
+
+active.GO.all$Dataset <- gsub(".GO.*","",rownames(active.GO.all))
+active.GO.all$Dataset <- factor(active.GO.all$Dataset,
+                                   levels = unique(active.GO.all$Dataset))
+active.GO.all$Description <- factor(active.GO.all$Description,
+                                   levels = rev(active.GO.term))
+write.csv(active.GO.all, "tables/active_GO_all.csv")
+```
+
+Combined GO figure
+
+```{r, fig.height=8, fig.width=15}
+DEG.list.entrez <- list()
+for (geo in names(remission.genes.list)){
+  EntrezID <- mapIds(org.Hs.eg.db, keys = remission.genes.list[[geo]], keytype = "SYMBOL", column = "ENTREZID")
+  EntrezID <- EntrezID[!is.na(EntrezID)]
+  DEG.list.entrez[[paste("GSE", geo, "_remission", sep = "")]] <- EntrezID
+}
+
+for (geo in names(active.genes.list)){
+  EntrezID <- mapIds(org.Hs.eg.db, keys = active.genes.list[[geo]], keytype = "SYMBOL", column = "ENTREZID")
+  EntrezID <- EntrezID[!is.na(EntrezID)]
+  DEG.list.entrez[[paste("GSE", geo, "_active", sep = "")]] <- EntrezID
+}
+
+combinedGO <- compareCluster(geneClusters = DEG.list.entrez, fun = "enrichGO", OrgDb = org.Hs.eg.db, ont = "BP", pvalueCutoff = 0.01, qvalueCutoff = 0.01)
+
+pdf("figures/GO_enrichment_combined.pdf", width = 13, height = 7)
+dotplot(combinedGO, showCategory = 3, by="geneRatio") + xlab("") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 11, face = "bold"), axis.title.y = element_text(size = 12))
+dev.off()
+
+combinedGO.read <- setReadable(combinedGO, OrgDb = org.Hs.eg.db)
+
+combinedGO.table <- combinedGO.read@compareClusterResult %>%
+  mutate(Fold.enrichment = calculateFoldEnrichment(combinedGO.read@compareClusterResult))
+write.csv(combinedGO.table, "figures/GEO_dataset_GOBP_all.csv")
+```
+
+### CEMiTool
+
+Load data from GSE179285
+
+```{r, include=FALSE}
+gset <- getGEO("GSE179285", GSEMatrix =TRUE, AnnotGPL=TRUE)
+if (length(gset) > 1) idx <- grep("GPL6480", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+# Get sample names in each group
+metaData <- pData(phenoData(gset))
+
+active <- row.names(dplyr::filter(metaData,`inflammation:ch1`=="Inflamed"))
+remission <- row.names(dplyr::filter(metaData,`inflammation:ch1`=="Uninflamed" & `diagnosis:ch1`!="Healthy control"))
+sel <- c(active, remission)
+
+group <- factor(c(rep("active", length(active)),rep("remission", length(remission))))
+
+## Filter, keep the samples in the comparison groups
+gset <- gset[ ,sel]
+exprs(gset) <- normalizeBetweenArrays(exprs(gset)) # normalize data - between array
+
+ex <- exprs(gset)
+gset$group <- factor(group)
+metaData <- pData(phenoData(gset))
+```
+
+Generate count matrix using common DE genes
+
+```{r, message=FALSE, warning=FALSE}
+common.label <- dplyr::filter(gset@featureData@data, Gene.symbol %in% c(common.remission, common.active)) %>%
+  dplyr::filter(!duplicated(Gene.symbol))
+
+expr <- ex[rownames(common.label),]
+expr <- as_data_frame(log2(expr))
+rownames(expr) <- common.label$Gene.symbol
+
+sample.annot <- tibble(SampleName = rownames(gset@phenoData@data), Class=gset@phenoData@data$group)
+sample.annot <- as.data.frame(sample.annot)
+```
+
+Analysis
+
+```{r, message=FALSE, warning=FALSE}
+cem <- new_cem(expr = expr, sample_annot = sample.annot, filter = F)
+cem <- find_modules(cem, cor_method = "pearson", network_type = "signed")
+
+cem <- plot_beta_r2(cem)
+pdf("figures/CEMiTool/Soft_threshold.pdf", width = 7, height = 5)
+cem@beta_r2_plot
+dev.off()
+
+cem <- plot_qq(cem)
+cem@qq_plot
+```
+
+GSEA analysis
+
+```{r, message=FALSE, warning=FALSE}
+cem <- mod_gsea(cem)
+cem <- plot_gsea(cem)
+pdf("figures/CEMiTool/Module_enrichment.pdf", width = 7, height = 5)
+show_plot(cem, "gsea")
+dev.off()
+```
+
+GO_biological process enrichment
+
+```{r, message=FALSE, warning=FALSE}
+bp.genesets.all <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "BP")
+subsets.bp <- data_frame(term=bp.genesets.all$gs_name, gene=bp.genesets.all$human_gene_symbol)
+subsets.bp$term <- gsub("GOBP_","",subsets.bp$term)
+
+cem <- mod_ora(cem, subsets.bp)
+cem <- plot_ora(cem, pv_cut=0.05)
+write_csv(cem@ora, "tables/Gene_modules_GO_enrichment.csv")
+
+cem@barplot_ora$M5
+cem@barplot_ora$M1
+
+cem@barplot_ora$M2
+cem@barplot_ora$M3
+cem@barplot_ora$M4
+
+
+pdf("figures/CEMiTool/GO_M5.pdf", width = 7, height = 5)
+cem@barplot_ora$M5
+dev.off()
+
+pdf("figures/CEMiTool/GO_M1.pdf", width = 7, height = 5)
+cem@barplot_ora$M1
+dev.off()
+
+pdf("figures/CEMiTool/GO_M2.pdf", width = 7, height = 5)
+cem@barplot_ora$M2
+dev.off()
+
+pdf("figures/CEMiTool/GO_M3.pdf", width = 7, height = 5)
+cem@barplot_ora$M3
+dev.off()
+
+pdf("figures/CEMiTool/GO_M4.pdf", width = 7, height = 5)
+cem@barplot_ora$M4
+dev.off()
+```
+
+Get hub genes
+
+```{r}
+GOI <- c()
+hubs <- get_hubs(cem, n = 30, method = "adjacency")
+for (i in c(1:length(hubs))){
+  GOI <- c(GOI, names(hubs[[i]]))
+}
+GOI <- unique(GOI)
+remission.hubgenes <- c(hubs$M2, hubs$M3, hubs$M4)
+```
+
+Adding protein interaction network for GOI (protein interaction data are retrived from string database version.11 https://string-db.org/)
+
+
+```{r}
+# GOI are the hub genes of gene modules
+GOI <- c()
+hubs <- get_hubs(cem, n = 30, method = "adjacency")
+for (i in c(1:length(hubs))){
+  GOI <- c(GOI, names(hubs[[i]]))
+}
+GOI <- unique(GOI)
+
+# read files downloaded from string database
+protein_db <- read.table(file = "data/9606.protein.links.v11.0.txt",header = TRUE, stringsAsFactors = F)
+string_proteins <- read.table(file = "data/human.name_2_string.tsv", header = FALSE, stringsAsFactors = F)
+
+# get protein interaction pairs of GOI
+get_PPI_pairs <- function(protein_db, string_proteins, min_combined_score, GOI){
+  GOI_1 <- GOI
+  find.GOI.1 <- string_proteins %>%
+    filter(V2 %in% GOI_1)  
+  GOI_1.id <- find.GOI.1$V3
+  GOI_1 <- find.GOI.1$V2
+  int.df.1 <- tibble(gene1symbol=0, gene2symbol=0)
+  for (i in 1:length(GOI_1)){
+    count = 0
+    gene2symbol = c()
+    int.temp <- protein_db %>%
+      filter(combined_score > min_combined_score) %>% # only retrieve high confident interactions
+      filter(protein1 == GOI_1.id[i])
+    if (length(int.temp$protein1)){
+      for (n in 1:length(int.temp$protein2)) {
+          find.protein <- string_proteins %>%
+            filter(V3 == int.temp$protein2[n])
+          if(length(find.protein$V2)){
+            gene2symbol[n] <- find.protein$V2
+          }
+        }
+        int.df.1 <- rbind(int.df.1,tibble(gene1symbol = rep(GOI_1[i], length(gene2symbol)), gene2symbol = gene2symbol))
+    }
+  }
+    int.df.1 <- as.data.frame(int.df.1) %>%
+      filter(gene1symbol != 0)%>%
+      filter(!is.na(gene1symbol) & !is.na(gene2symbol))
+    return(int.df.1)
+}
+
+int.df <- get_PPI_pairs(protein_db = protein_db, string_proteins = string_proteins, min_combined_score = 700, GOI = GOI)
+```
+
+Add protein interactions to analysis
+
+```{r}
+interactions_data(cem) <- int.df.1 # add interactions
+cem <- plot_interactions(cem,n=30) # generate plot
+
+pdf("figures/CEMiTool/network_hub_M1.pdf", width = 10, height = 7)
+cem@interaction_plot$M1
+dev.off()
+
+pdf("figures/CEMiTool/network_hub_M5.pdf", width = 10, height = 7)
+cem@interaction_plot$M5
+dev.off()
+
+pdf("figures/CEMiTool/network_hub_M2.pdf", width = 10, height = 7)
+cem@interaction_plot$M2
+dev.off()
+
+pdf("figures/CEMiTool/network_hub_M3.pdf", width = 10, height = 7)
+cem@interaction_plot$M3
+dev.off()
+
+pdf("figures/CEMiTool/network_hub_M4.pdf", width = 10, height = 7)
+cem@interaction_plot$M4
+dev.off()
+
+
+write_csv(cem@module, "figures/CEMiTool/Gene_modules.csv")
+```
+
+
+
