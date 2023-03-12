@@ -4,10 +4,6 @@ author: Peinan Zhao
 ---
 
 ```{r, include=FALSE}
-Sys.setenv(RENV_PATHS_CACHE = "/fs02/ha75/renv/cache/")
-Sys.setenv(R_LIBS = "/fs02/ha75/R_library_4.0/")
-.libPaths("~/ha75/R_library_4.0/")
-
 library(GEOquery)
 library(edgeR)
 library(limma)
@@ -69,10 +65,10 @@ active.matrix <- active.genes.list.1 %>%
 
 
 remission.matrix.sort <- remission.matrix[order(-remission.matrix$sum),]
-write_csv(remission.matrix.sort, "tables/common_remission_genes.csv")
+#write_csv(remission.matrix.sort, "tables/common_remission_genes.csv")
 
 active.matrix.sort <- active.matrix[order(-active.matrix$sum),]
-write_csv(active.matrix.sort, "tables/common_active_genes.csv")
+#write_csv(active.matrix.sort, "tables/common_active_genes.csv")
 ```
 
 ### UpSetR
@@ -89,7 +85,7 @@ ints[[i+1]] <- c(include.study)
 
 up.plot <- as.data.frame(remission.matrix[,c(2:7)])
 colnames(up.plot) <- paste("GSE",colnames(up.plot), sep = "")
-pdf("figures/UpSetR_remission.pdf", width = 10, height = 5)
+#pdf("figures/UpSetR_remission.pdf", width = 10, height = 5)
 upset(up.plot, mainbar.y.label = "Remission marker genes",nsets = 6, order.by = c("freq"),
       queries = list(
         list(query = intersects, params = ints[[1]], color = "orange", active = T),
@@ -97,9 +93,9 @@ upset(up.plot, mainbar.y.label = "Remission marker genes",nsets = 6, order.by = 
         list(query = intersects, params = ints[[6]], color = "orange", active = T),
         list(query = intersects, params = ints[[7]], color = "orange", active = T)), 
       point.size = 2, number.angles = 20)
-dev.off()
+#dev.off()
 
-pdf("figures/UpSetR_active.pdf", width = 10, height = 5)
+#pdf("figures/UpSetR_active.pdf", width = 10, height = 5)
 up.plot <- as.data.frame(active.matrix[,c(2:7)])
 colnames(up.plot) <- paste("GSE",colnames(up.plot), sep = "")
 upset(up.plot, mainbar.y.label = "Active marker genes",nsets = 6, order.by = c("freq"),
@@ -109,7 +105,7 @@ upset(up.plot, mainbar.y.label = "Active marker genes",nsets = 6, order.by = c("
         list(query = intersects, params = ints[[6]], color = "orange", active = T),
         list(query = intersects, params = ints[[7]], color = "orange", active = T)), 
       point.size = 2, number.angles = 20)
-dev.off()
+#dev.off()
 
 ```
 
@@ -129,7 +125,8 @@ GO.common.remission <- GO.common.remission@result
 GO.common.remission$Fold.enrichment <- calculateFoldEnrichment(GO.common.remission)
 GO.common.remission <- GO.common.remission  %>%
   filter(p.adjust < 0.01)
-write.xlsx(GO.common.remission, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Remission", row.names = F, append = F)
+
+#write.xlsx(GO.common.remission, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Remission", row.names = F, append = F)
 ```
 
 Common Active marker genes: Up regulation in remission group in **>= 5** studies
@@ -148,7 +145,8 @@ GO.common.active <- GO.common.active@result
 GO.common.active$Fold.enrichment <- calculateFoldEnrichment(GO.common.active)
 GO.common.active <- GO.common.active  %>%
   filter(p.adjust < 0.01)
-write.xlsx(GO.common.active, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Inflamed", row.names = F, append = T)
+
+#write.xlsx(GO.common.active, file = "figures/common_DEGs_GOBP.xlsx", sheetName = "Inflamed", row.names = F, append = T)
 ```
 
 all DEGs
@@ -203,7 +201,6 @@ pdf("figures/UpSetR_active.pdf", width = 5, height = 5)
 p
 dev.off()
 ```
-
 
 ### GO analysis
 
